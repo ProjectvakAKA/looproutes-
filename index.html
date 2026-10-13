@@ -184,6 +184,7 @@ textarea{width:100%;height:90px;margin-top:8px;font:12px/1.3 ui-monospace,Menlo,
         <label class="opt">Aantal routes<input type="number" id="nRoutes" min="1" max="6" step="1" value="4"></label>
         <label class="opt">Toegestane afwijking (m)<input type="number" id="tol" min="5" max="500" step="5" value="30"></label>
         <label class="opt">Dubbel lopen vermijden: <output id="penOut">4</output><input type="range" id="pen" min="0" max="10" step="0.5" value="4"></label>
+        <label class="opt">Heen en terug via zelfde corridor vermijden: <output id="parOut">15</output><input type="range" id="par" min="0" max="30" step="1" value="15"></label>
         <label class="opt">Seed (andere willekeur)<input type="number" id="seedIn" min="1" step="1" value="1"></label>
         <p class="hint">Startpunt: klik op de kaart, sleep de vlag, of plak hier coördinaten uit Google Maps. Hogere vermijding = minder dubbel, maar moeilijker op de juiste lengte.</p>
       </div>
@@ -403,9 +404,39 @@ function pathStats(G, route){
   }
   return { total, rep, u };
 }
-function score(total, rep, target, tol, u){
+let PAR = 15;   // gewicht "zelfde corridor vermijden" (0 = uit)
+
+function shape(G, geo, route){
+  const X = geo.X, Y = geo.Y, nd = route.nodes;
+  const CELL = 40, GAP = 250, seen = new Map();
+  let s = 0, ov = 0, n = 0;
+  for (let k = 0; k < nd.length - 1; k++){
+    const a = nd[k], b = nd[k + 1], len = G.edges[route.edges[k]].len;
+    const steps = Math.max(1, Math.round(len / 30));
+    for (let m = 0; m < steps; m++){
+      const t = (m + .5) / steps, x = X[a] + (X[b] - X[a]) * t, y = Y[a] + (Y[b] - Y[a]) * t, sp = s + len * t;
+      const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+      n++;
+      if ((x - X[nd[0]]) ** 2 + (y - Y[nd[0]]) ** 2 > 14400){   // niet bij de start
+        let hit = false;
+        for (let dx = -1; dx <= 1 && !hit; dx++) for (let dy = -1; dy <= 1; dy++){
+          const v = seen.get((cx + dx) * 4000000 + cy + dy);
+          if (v !== undefined && sp - v > GAP){ hit = true; break; }
+        }
+        if (hit) ov++;
+      }
+      const key = cx * 4000000 + cy;
+      if (!seen.has(key)) seen.set(key, sp);
+    }
+    s += len;
+  }
+  return { par: n ? ov / n : 0 };
+}
+function score(total, rep, target, tol, u, par){
   const err = Math.abs(total - target);
-  return (err <= tol ? 0 : 1 + err / target * 100) + (total ? 3 * rep / total : 3) + 0.05 * (u || 0);
+  return (err <= tol ? 0 : 1 + err / target * 100) + (total ? 3 * rep / total : 3) + 0.05 * (u || 0)
+       + PAR * par;
+}
 }
 function makeGeo(G){
   let lat0 = 0; for (let i = 0; i < G.n; i++) lat0 += G.lat[i]; lat0 /= G.n;
@@ -487,11 +518,12 @@ const tick = () => new Promise(r => setTimeout(r, 0));
 async function makeLoop(G, geo, start, target, tol, pen, seed, onProgress){
   const TRIALS = 120, ITERS = 700, EXTRA = 1200;
   const rnd = rng32(seed);
-  const ev = wps => {
-    const r = routeThrough(G, wps, pen); if (!r) return null;
-    const s = pathStats(G, r);
-    return { nodes: r.nodes, edges: r.edges, total: s.total, rep: s.rep, u: s.u, sc: score(s.total, s.rep, target, tol, s.u) };
-  };
+const ev = wps => {
+  const r = routeThrough(G, wps, pen); if (!r) return null;
+  const s = pathStats(G, r), sh = shape(G, geo, r);
+  return { nodes: r.nodes, edges: r.edges, total: s.total, rep: s.rep, u: s.u, par: sh.par,
+           sc: score(s.total, s.rep, target, tol, s.u, sh.par) };
+};
   let best = null, wps = null;
   for (let t = 0; t < TRIALS; t++){
     const c = randomConfig(geo, start, target, rnd);
@@ -510,7 +542,8 @@ async function makeLoop(G, geo, start, target, tol, pen, seed, onProgress){
       if (r && r.sc <= best.sc){ best = r; wps = c; }
     }
     if (it % 15 === 0){ if (onProgress) onProgress((TRIALS + Math.min(it, ITERS)) / (TRIALS + ITERS), best); await tick(); }
-    if (Math.abs(best.total - target) <= tol && best.rep / best.total < 0.005 && best.u === 0) break;
+    if (Math.abs(best.total - target) <= tol && best.rep / best.total < 0.005 && best.u === 0
+    && best.par < 0.05) break;
   }
   return best;
 }
@@ -661,7 +694,7 @@ function applyStartText(){
 }
 $('startIn').onchange = applyStartText;
 map.on('click', e => { if (startMarker && !running) moveStart(e.latlng.lat, e.latlng.lng); });
-$('pen').oninput = e => { $('penOut').textContent = e.target.value; };
+$('par').oninput = e => { $('parOut').textContent = e.target.value; };
 
 /* ---- afstand ---- */
 function setKm(v){
@@ -722,6 +755,7 @@ async function generate(){
     const ll = startMarker.getLatLng();
     const start = geo.snap(ll.lng * geo.kx, ll.lat * geo.ky);
     const n = Math.max(1, Math.min(6, parseInt($('nRoutes').value) || 4));
+    PAR = parseFloat($('par').value);
     const out = [];
     for (let i = 0; i < n; i++){
       const r = await makeLoop(G, geo, start, target, tol, pen, seed * 10 + i, p => {
