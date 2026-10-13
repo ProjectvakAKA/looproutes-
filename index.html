@@ -437,7 +437,6 @@ function score(total, rep, target, tol, u, par){
   return (err <= tol ? 0 : 1 + err / target * 100) + (total ? 3 * rep / total : 3) + 0.05 * (u || 0)
        + PAR * par;
 }
-}
 function makeGeo(G){
   let lat0 = 0; for (let i = 0; i < G.n; i++) lat0 += G.lat[i]; lat0 /= G.n;
   const kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 111320;
